@@ -1,0 +1,85 @@
+name: 'Feishu Deploy Notify'
+description: '部署完成后发送飞书卡片通知（成功绿卡/失败红卡）'
+
+inputs:
+  webhook_url:
+    description: '飞书 Webhook URL'
+    required: true
+  project_name:
+    description: '项目名称，显示在通知标题中'
+    required: true
+  status:
+    description: '部署状态: success 或 failure'
+    required: true
+    default: 'success'
+  commit_message:
+    description: '提交信息'
+    required: false
+    default: ''
+  actor:
+    description: '触发人'
+    required: false
+    default: ''
+  commit_url:
+    description: '提交链接'
+    required: false
+    default: ''
+  run_url:
+    description: 'Action 运行日志链接'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Send Feishu notification
+      shell: bash
+      run: |
+        if [ "${{ inputs.status }}" = "success" ]; then
+          TITLE="✅ ${{ inputs.project_name }} 部署成功"
+          TEMPLATE="green"
+          BTN_TEXT="查看提交"
+          BTN_URL="${{ inputs.commit_url }}"
+          BTN_TYPE="primary"
+        else
+          TITLE="❌ ${{ inputs.project_name }} 部署失败"
+          TEMPLATE="red"
+          BTN_TEXT="查看日志"
+          BTN_URL="${{ inputs.run_url }}"
+          BTN_TYPE="danger"
+        fi
+
+        COMMIT_MSG=$(echo "${{ inputs.commit_message }}" | head -1 | sed 's/"/\\"/g')
+        TIME=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')
+
+        curl -s -X POST "${{ inputs.webhook_url }}" \
+          -H 'Content-Type: application/json' \
+          -d "{
+            \"msg_type\": \"interactive\",
+            \"card\": {
+              \"header\": {
+                \"title\": { \"tag\": \"plain_text\", \"content\": \"${TITLE}\" },
+                \"template\": \"${TEMPLATE}\"
+              },
+              \"elements\": [
+                {
+                  \"tag\": \"div\",
+                  \"text\": {
+                    \"tag\": \"lark_md\",
+                    \"content\": \"**提交**: ${COMMIT_MSG}\n**作者**: ${{ inputs.actor }}\n**时间**: ${TIME}\"
+                  }
+                },
+                {
+                  \"tag\": \"action\",
+                  \"actions\": [
+                    {
+                      \"tag\": \"button\",
+                      \"text\": { \"tag\": \"plain_text\", \"content\": \"${BTN_TEXT}\" },
+                      \"url\": \"${BTN_URL}\",
+                      \"type\": \"${BTN_TYPE}\"
+                    }
+                  ]
+                }
+              ]
+            }
+          }"
