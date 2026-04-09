@@ -28,6 +28,14 @@ inputs:
     description: 'Action 运行日志链接'
     required: false
     default: ''
+  branch:
+    description: '分支名称'
+    required: false
+    default: ''
+  sha:
+    description: '提交 SHA（完整或短）'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -50,7 +58,10 @@ runs:
         fi
 
         COMMIT_MSG=$(echo "${{ inputs.commit_message }}" | head -1 | sed 's/"/\\"/g')
-        TIME=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')
+        SHORT_SHA="${{ inputs.sha }}"
+        if [ ${#SHORT_SHA} -gt 7 ]; then
+          SHORT_SHA="${SHORT_SHA:0:7}"
+        fi
 
         curl -s -X POST "${{ inputs.webhook_url }}" \
           -H 'Content-Type: application/json' \
@@ -64,10 +75,17 @@ runs:
               \"elements\": [
                 {
                   \"tag\": \"div\",
-                  \"text\": {
-                    \"tag\": \"lark_md\",
-                    \"content\": \"**提交**: ${COMMIT_MSG}\n**作者**: ${{ inputs.actor }}\n**时间**: ${TIME}\"
-                  }
+                  \"fields\": [
+                    { \"is_short\": true, \"text\": { \"tag\": \"lark_md\", \"content\": \"**提交**: ${COMMIT_MSG}\" } },
+                    { \"is_short\": true, \"text\": { \"tag\": \"lark_md\", \"content\": \"**作者**: ${{ inputs.actor }}\" } }
+                  ]
+                },
+                {
+                  \"tag\": \"div\",
+                  \"fields\": [
+                    { \"is_short\": true, \"text\": { \"tag\": \"lark_md\", \"content\": \"**分支**: ${{ inputs.branch }}\" } },
+                    { \"is_short\": true, \"text\": { \"tag\": \"lark_md\", \"content\": \"**SHA**: ${SHORT_SHA}\" } }
+                  ]
                 },
                 {
                   \"tag\": \"action\",
