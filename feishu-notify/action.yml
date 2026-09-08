@@ -42,62 +42,111 @@ runs:
   steps:
     - name: Send Feishu notification
       shell: bash
+      # 所有外部输入一律走 env，脚本里只用 "$VAR" 引用。
+      #
+      # 绝不能把 ${{ inputs.xxx }} 直接写进 run 的脚本正文：那是在脚本**生成时**做
+      # 文本替换的，等于把别人写的内容当代码拼进来。2026-09-08 就这么炸过一次——
+      # 某条提交信息里带了一段 JSON（`{"accessToken": "...", ...}`），bash 把那对
+      # 花括号当成命令组去执行，报 `accessToken: command not found`，整个通知步骤失败，
+      # 于是飞书收到一条"部署失败"，可实际部署好好的。误报只是表症，真正的问题是
+      # **谁能写提交信息，谁就能在 runner 上执行任意命令**，包括把 secrets 带走。
+      env:
+        WEBHOOK_URL: ${{ inputs.webhook_url }}
+        PROJECT_NAME: ${{ inputs.project_name }}
+        STATUS: ${{ inputs.status }}
+        COMMIT_MESSAGE: ${{ inputs.commit_message }}
+        ACTOR: ${{ inputs.actor }}
+        COMMIT_URL: ${{ inputs.commit_url }}
+        RUN_URL: ${{ inputs.run_url }}
+        BRANCH: ${{ inputs.branch }}
+        SHA: ${{ inputs.sha }}
       run: |
-        if [ "${{ inputs.status }}" = "success" ]; then
-          TITLE="✅ ${{ inputs.project_name }} 部署成功"
+        set -euo pipefail
+
+        if [ "$STATUS" = "success" ]; then
+          TITLE="✅ ${PROJECT_NAME} 部署成功"
           TEMPLATE="green"
           BTN_TEXT="查看提交"
-          BTN_URL="${{ inputs.commit_url }}"
+          BTN_URL="$COMMIT_URL"
           BTN_TYPE="primary"
         else
-          TITLE="❌ ${{ inputs.project_name }} 部署失败"
+          TITLE="❌ ${PROJECT_NAME} 部署失败"
           TEMPLATE="red"
           BTN_TEXT="查看日志"
-          BTN_URL="${{ inputs.run_url }}"
+          BTN_URL="$RUN_URL"
           BTN_TYPE="danger"
         fi
 
-        COMMIT_MSG=$(echo "${{ inputs.commit_message }}" | head -1 | sed 's/"/\\"/g')
-        SHORT_SHA="${{ inputs.sha }}"
+        # 只取第一行：提交信息可能很长（squash 合并会把整个 PR 描述塞进来）。
+        # printf 而不是 echo：echo 对反斜杠的处理各家 shell 不一致。
+        COMMIT_FIRST_LINE=$(printf '%s' "$COMMIT_MESSAGE" | head -n 1)
+
+        SHORT_SHA="$SHA"
         if [ ${#SHORT_SHA} -gt 7 ]; then
           SHORT_SHA="${SHORT_SHA:0:7}"
         fi
 
-        curl -s -X POST "${{ inputs.webhook_url }}" \
-          -H 'Content-Type: application/json' \
-          -d "{
-            \"msg_type\": \"interactive\",
-            \"card\": {
-              \"header\": {
-                \"title\": { \"tag\": \"plain_text\", \"content\": \"${TITLE}\" },
-                \"template\": \"${TEMPLATE}\"
+        # 用 jq 生成 JSON，不手工拼字符串。
+        # 手工拼的老写法只用 sed 转义了双引号，遇到反斜杠、换行、制表符照样生成非法 JSON，
+        # 飞书那边会直接拒收——这类失败比命令注入更常见，只是不显眼。
+        # 按钮 url 为空时飞书会拒收整张卡，所以没链接就不放按钮。
+        PAYLOAD=$(jq -n \
+          --arg title "$TITLE" \
+          --arg template "$TEMPLATE" \
+          --arg commit "$COMMIT_FIRST_LINE" \
+          --arg actor "$ACTOR" \
+          --arg branch "$BRANCH" \
+          --arg sha "$SHORT_SHA" \
+          --arg btn_text "$BTN_TEXT" \
+          --arg btn_url "$BTN_URL" \
+          --arg btn_type "$BTN_TYPE" \
+          '{
+            msg_type: "interactive",
+            card: {
+              header: {
+                title: { tag: "plain_text", content: $title },
+                template: $template
               },
-              \"elements\": [
-                {
-                  \"tag\": \"div\",
-                  \"fields\": [
-                    { \"is_short\": true, \"text\": { \"tag\": \"lark_md\", \"content\": \"**提交**: ${COMMIT_MSG}\" } },
-                    { \"is_short\": true, \"text\": { \"tag\": \"lark_md\", \"content\": \"**作者**: ${{ inputs.actor }}\" } }
-                  ]
-                },
-                {
-                  \"tag\": \"div\",
-                  \"fields\": [
-                    { \"is_short\": true, \"text\": { \"tag\": \"lark_md\", \"content\": \"**分支**: ${{ inputs.branch }}\" } },
-                    { \"is_short\": true, \"text\": { \"tag\": \"lark_md\", \"content\": \"**SHA**: ${SHORT_SHA}\" } }
-                  ]
-                },
-                {
-                  \"tag\": \"action\",
-                  \"actions\": [
-                    {
-                      \"tag\": \"button\",
-                      \"text\": { \"tag\": \"plain_text\", \"content\": \"${BTN_TEXT}\" },
-                      \"url\": \"${BTN_URL}\",
-                      \"type\": \"${BTN_TYPE}\"
-                    }
-                  ]
-                }
-              ]
+              elements: (
+                [
+                  {
+                    tag: "div",
+                    fields: [
+                      { is_short: true, text: { tag: "lark_md", content: ("**提交**: " + $commit) } },
+                      { is_short: true, text: { tag: "lark_md", content: ("**作者**: " + $actor) } }
+                    ]
+                  },
+                  {
+                    tag: "div",
+                    fields: [
+                      { is_short: true, text: { tag: "lark_md", content: ("**分支**: " + $branch) } },
+                      { is_short: true, text: { tag: "lark_md", content: ("**SHA**: " + $sha) } }
+                    ]
+                  }
+                ]
+                + (if $btn_url == "" then [] else [{
+                    tag: "action",
+                    actions: [{
+                      tag: "button",
+                      text: { tag: "plain_text", content: $btn_text },
+                      url: $btn_url,
+                      type: $btn_type
+                    }]
+                  }] end)
+              )
             }
-          }"
+          }')
+
+        # 通知发不出去不该让整个工作流变红：那会造成"通知失败被当成部署失败"的二次误报，
+        # 正是这次要根治的问题。发不出去就在日志里留痕，由人去看。
+        HTTP_CODE=$(curl -s -o /tmp/feishu-resp.txt -w '%{http_code}' -X POST "$WEBHOOK_URL" \
+          -H 'Content-Type: application/json' \
+          --data-binary "$PAYLOAD" || echo "000")
+
+        echo "飞书返回 HTTP $HTTP_CODE"
+        cat /tmp/feishu-resp.txt 2>/dev/null || true
+        echo ""
+
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "::warning::飞书通知没发出去（HTTP $HTTP_CODE），但这不影响部署本身"
+        fi
